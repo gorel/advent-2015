@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+
+# First ensure day is a number padded with leading zeros
+# If it already has zeros, do nothing
+day=$1
+if [ ${#day} -eq 1 ]; then
+	day="0$day"
+fi
+
+filename="./pkg/day${day}/day${day}.go"
+
+mkdir -p "./pkg/day${day}"
+cp ./pkg/template.go "$filename"
+
+nvim "$filename"
