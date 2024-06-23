@@ -2,17 +2,14 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"golang.org/x/exp/constraints"
 )
 
-// Lazy copy-paste functions
-func toInt(s string) int {
-	i, _ := strconv.Atoi(s)
-	return i
-}
+// Pretty close to infinity
+const INF = 1 << 30
 
+// Lazy copy-paste functions
 func min[T constraints.Ordered](args ...T) T {
 	m := args[0]
 	for _, arg := range args {
@@ -33,19 +30,6 @@ func max[T constraints.Ordered](args ...T) T {
 	return m
 }
 
-func slicesEqual[T constraints.Ordered](s0 []T, s1 []T) bool {
-	if len(s0) != len(s1) {
-		return false
-	}
-
-	for idx, a := range s0 {
-		if a != s1[idx] {
-			return false
-		}
-	}
-	return true
-}
-
 type Player struct {
 	hp     int
 	mana   int
@@ -54,38 +38,26 @@ type Player struct {
 }
 
 type Game struct {
-	turn    int
-	player  Player
-	boss    Player
-	effects map[string]Effect
-	path    []string
+	turn     int
+	player   Player
+	boss     Player
+	effects  map[string]Effect
+	path     []string
+	hardMode bool
 }
 
-type newGameOption func(*Game)
-
-func NewGame(player Player, boss Player, opts ...newGameOption) Game {
-	res := Game{
-		player:  player,
-		boss:    boss,
-		effects: make(map[string]Effect),
-	}
-
-	for _, opt := range opts {
-		opt(&res)
-	}
-	return res
-}
-
-func withEffect(e Effect) newGameOption {
-	return func(g *Game) {
-		g.effects[e.name] = e
+func NewGame(player Player, boss Player, hardMode bool) Game {
+	return Game{
+		player:   player,
+		boss:     boss,
+		effects:  make(map[string]Effect),
+		hardMode: hardMode,
 	}
 }
 
 type Effect struct {
 	name           string
 	armor          int
-	playerPoison   int
 	poison         int
 	manaRecharge   int
 	turnsRemaining int
@@ -101,7 +73,7 @@ type Spell struct {
 
 var spells = []Spell{
 	{
-		name:   "Magic Missile",
+		name:   "MagicMissile",
 		mana:   53,
 		damage: 4,
 	},
@@ -140,30 +112,10 @@ var spells = []Spell{
 	},
 }
 
-type gameState int
-
-const (
-	WIN gameState = iota
-	LOSE
-	ONGOING
-)
-
-func (g *Game) status() gameState {
-	if g.player.hp <= 0 {
-		return LOSE
-	} else if g.boss.hp <= 0 {
-		return WIN
-	}
-	return ONGOING
-}
-
 func (g *Game) tickEffects(isPlayerTurn bool) {
 	newEffects := make(map[string]Effect)
 	for _, e := range g.effects {
 		g.player.armor += e.armor
-		if isPlayerTurn {
-			g.player.hp -= e.playerPoison
-		}
 		g.boss.hp -= e.poison
 		g.player.mana += e.manaRecharge
 		e.turnsRemaining -= 1
@@ -174,11 +126,11 @@ func (g *Game) tickEffects(isPlayerTurn bool) {
 	g.effects = newEffects
 }
 
-func (g *Game) checkForEnd(costForWin int) (bool, int) {
+func (g *Game) checkForEnd() (bool, int) {
 	if g.player.hp <= 0 {
-		return true, 1 << 31
+		return true, INF
 	} else if g.boss.hp <= 0 {
-		return true, costForWin
+		return true, 0
 	}
 	return false, -1
 }
@@ -187,9 +139,12 @@ func (g *Game) castAndDFS(s Spell) int {
 	g.path = append(g.path, s.name)
 	// Player turn starts: tick effects
 	g.tickEffects(true)
+	if g.hardMode {
+		g.player.hp -= 1
+	}
 
 	// Check for wincon
-	if ended, res := g.checkForEnd(s.mana); ended {
+	if ended, res := g.checkForEnd(); ended {
 		return res
 	}
 
@@ -202,7 +157,7 @@ func (g *Game) castAndDFS(s Spell) int {
 	}
 
 	// Check for wincon
-	if ended, res := g.checkForEnd(s.mana); ended {
+	if ended, res := g.checkForEnd(); ended {
 		return res
 	}
 
@@ -210,7 +165,7 @@ func (g *Game) castAndDFS(s Spell) int {
 	g.tickEffects(false)
 
 	// Check for wincon
-	if ended, res := g.checkForEnd(s.mana); ended {
+	if ended, res := g.checkForEnd(); ended {
 		return res
 	}
 
@@ -218,28 +173,22 @@ func (g *Game) castAndDFS(s Spell) int {
 	g.player.hp -= max(1, g.boss.damage-g.player.armor)
 
 	// Check for wincon
-	if ended, res := g.checkForEnd(s.mana); ended {
+	if ended, res := g.checkForEnd(); ended {
 		return res
 	}
 
-	// If no one won yet, we continue recursing.
-	// No matter what, remember that we *did* cast this spell, though.
-	res := g.dfs()
-	if res < 1<<29 {
-		return s.mana + res
-	}
-	// But if we're returning 1<<31, that's the sentinel for "no win possible"
-	return res
+	// If no one won yet, go to the next turn
+	return min(INF, g.dfs())
 }
 
 func (g *Game) dfs() int {
 	g.turn += 1
 	// Going too long -- not viable
-	if g.turn >= 10 {
-		return 1 << 31
+	if g.turn >= 12 {
+		return INF
 	}
 
-	best := 1 << 31
+	best := INF
 	var bestPath []string
 	// Then let the player choose an action
 	for _, spell := range spells {
@@ -254,13 +203,15 @@ func (g *Game) dfs() int {
 
 		// Viable candidate: Recurse
 		g2 := *g
-		g2Score := g2.castAndDFS(spell)
-		if g2Score < best {
-			best = g2Score
+		g2Cost := spell.mana + g2.castAndDFS(spell)
+		if g2Cost < best {
+			best = g2Cost
 			bestPath = g2.path
 		}
 	}
-	g.path = bestPath
+	if best < INF {
+		g.path = bestPath
+	}
 	if g.turn == 1 {
 		fmt.Printf("\nBest path: %+v\n\n", g.path)
 	}
@@ -280,14 +231,19 @@ func main() {
 		hp:     51, // hp,
 		damage: 9,  // dmg,
 	}
-	game := NewGame(player, boss)
+
+	game := Game{
+		player:  player,
+		boss:    boss,
+		effects: make(map[string]Effect),
+	}
 	fmt.Printf("Part 1: %d\n", game.dfs())
 
-	hardMode := NewGame(player, boss,
-		withEffect(Effect{
-			name:           "Hard mode",
-			playerPoison:   1,
-			turnsRemaining: 1 << 31,
-		}))
+	hardMode := Game{
+		player:   player,
+		boss:     boss,
+		effects:  make(map[string]Effect),
+		hardMode: true,
+	}
 	fmt.Printf("Part 2: %d\n", hardMode.dfs())
 }
