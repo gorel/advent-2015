@@ -155,7 +155,7 @@ func (g *GameState) tickEffects(isPlayerTurn bool) *GameState {
 		for _, e := range g.effects {
 			o += fmt.Sprintf(" %s ", e.name)
 		}
-		g.option = o + "]"
+		nextState.option = o + "]"
 	}
 
 	newEffects := make(map[string]Effect)
@@ -269,15 +269,18 @@ func (g *GameState) Path() string {
 
 func (g *GameState) turnString() string {
 	// Offset by 1 because it's what happened *after* the turn played
+	if g.turn == 0 {
+		return "GAME START"
+	}
 	switch g.turn % 4 {
 	case 1:
 		return "pre-player environment"
 	case 2:
-		return "player attacks"
+		return "player"
 	case 3:
 		return "pre-boss environment"
 	case 0:
-		return "boss attacks"
+		return "boss"
 	}
 	return "INVALID STATE"
 }
@@ -289,11 +292,11 @@ func (g *GameState) PrintLog() {
 			fmt.Printf("Turn %2d (%s)\n", cur.turn, cur.turnString())
 			fmt.Printf("-------\n")
 			fmt.Printf("Action: %s\n", cur.option)
-			pString := fmt.Sprintf("Player (%d mana)", cur.player.mana)
+			fmt.Printf("Player: %dhp, %dmana", cur.player.hp, cur.player.mana)
 			if cur.player.armor > 0 {
-				pString += "(+armor)"
+				fmt.Printf(" (+armor)")
 			}
-			fmt.Printf("%s: %2d, Boss: %2d\n", pString, cur.player.hp, cur.boss.hp)
+			fmt.Printf("\nBoss: %dhp\n", cur.boss.hp)
 			fmt.Printf("\n")
 		}
 		cur = cur.next
