@@ -282,7 +282,7 @@ func (g GameState) nextCandidates() []*GameState {
 			continue
 		}
 		// Effect already active
-		if _, ok := g.effects[spell.name]; ok {
+		if _, ok := nextState.effects[spell.name]; ok {
 			continue
 		}
 
@@ -358,16 +358,16 @@ func (g GameState) PrintLog() {
 }
 
 func main() {
-	// var hp, dmg int
-	// fmt.Scanf("Hit Points: %d\n", &hp)
-	// fmt.Scanf("Damage: %d\n", &dmg)
+	var hp, dmg int
+	fmt.Scanf("Hit Points: %d\n", &hp)
+	fmt.Scanf("Damage: %d\n", &dmg)
 	player := Player{
 		hp:   50,
 		mana: 500,
 	}
 	boss := Player{
-		hp:     51, // hp,
-		damage: 9,  // dmg,
+		hp:     hp,
+		damage: dmg,
 	}
 
 	game := NewGame(player, boss)
