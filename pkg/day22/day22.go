@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"fmt"
 
 	"golang.org/x/exp/constraints"
@@ -12,16 +13,6 @@ const INF = 1 << 30
 var bestSeen = INF
 
 // Lazy copy-paste functions
-func min[T constraints.Ordered](args ...T) T {
-	m := args[0]
-	for _, arg := range args {
-		if arg < m {
-			m = arg
-		}
-	}
-	return m
-}
-
 func max[T constraints.Ordered](args ...T) T {
 	m := args[0]
 	for _, arg := range args {
@@ -104,7 +95,7 @@ type GameState struct {
 	effects map[string]Effect
 
 	cost   int
-	option string
+	action string
 	prev   *GameState
 	next   *GameState
 }
@@ -117,15 +108,15 @@ func withEffect(e Effect) gameOption {
 	}
 }
 
-func NewGame(player Player, boss Player, opts ...gameOption) GameState {
-	res := GameState{
+func NewGame(player Player, boss Player, opts ...gameOption) *GameState {
+	res := &GameState{
 		player:  player,
 		boss:    boss,
 		effects: make(map[string]Effect),
-		option:  "START",
+		action:  "START",
 	}
 	for _, opt := range opts {
-		opt(&res)
+		opt(res)
 	}
 	return res
 }
@@ -147,18 +138,48 @@ func (g *GameState) CloneAndAdvance() *GameState {
 	}
 }
 
+type CandidatesList struct {
+	candidates []*GameState
+}
+
+func (c *CandidatesList) Add(g ...*GameState) {
+	c.candidates = append(c.candidates, g...)
+}
+
+func (c *CandidatesList) Empty() bool {
+	return len(c.candidates) == 0
+}
+
+func (c CandidatesList) Len() int {
+	return len(c.candidates)
+}
+
+func (c CandidatesList) Less(i, j int) bool {
+	return c.candidates[i].cost < c.candidates[j].cost
+}
+
+func (c CandidatesList) Swap(i, j int) {
+	tmp := c.candidates[i]
+	c.candidates[i] = c.candidates[j]
+	c.candidates[j] = tmp
+}
+
+func (c *CandidatesList) Push(x any) {
+	c.candidates = append(c.candidates, x.(*GameState))
+}
+
+func (c *CandidatesList) Pop() any {
+	res := c.candidates[len(c.candidates)-1]
+	c.candidates = c.candidates[:len(c.candidates)-1]
+	return res
+}
+
 func (g *GameState) tickEffects(isPlayerTurn bool) *GameState {
 	nextState := g.CloneAndAdvance()
-	g.next = nextState
-	if len(g.effects) > 0 {
-		o := "[tick effects: "
-		for _, e := range g.effects {
-			o += fmt.Sprintf(" %s ", e.name)
-		}
-		nextState.option = o + "]"
-	}
+	nextState.player.armor = 0
 
 	newEffects := make(map[string]Effect)
+	var action string
 	for _, e := range g.effects {
 		if isPlayerTurn {
 			nextState.player.hp -= e.playerPoison
@@ -167,20 +188,95 @@ func (g *GameState) tickEffects(isPlayerTurn bool) *GameState {
 		nextState.boss.hp -= e.poison
 		nextState.player.mana += e.manaRecharge
 		e.turnsRemaining -= 1
+		turnsString := " (expiring)"
 		if e.turnsRemaining > 0 {
+			if e.turnsRemaining < INF/2 {
+				turnsString = fmt.Sprintf(" (%d turns left)", e.turnsRemaining)
+			} else {
+				turnsString = ""
+			}
 			newEffects[e.name] = e
 		}
+		action += fmt.Sprintf(" {%s%s} ", e.name, turnsString)
+	}
+	if action != "" {
+		nextState.action = fmt.Sprintf("[tick effects: %s]", action)
 	}
 	nextState.effects = newEffects
 	return nextState
 }
 
-func (g *GameState) tickBestPlayerTurn() *GameState {
-	bestState := g.CloneAndAdvance()
-	bestState.cost = INF
-	bestEndState := bestState
+func (g *GameState) tickPlayerTurn(spell Spell) *GameState {
+	nextState := g.CloneAndAdvance()
+	nextState.action = fmt.Sprintf("Player casts %s (-%d mana)", spell.name, spell.mana)
+	nextState.cost += spell.mana
+	nextState.player.mana -= spell.mana
+	nextState.boss.hp -= spell.damage
+	nextState.player.hp += spell.healing
+	if spell.effect != nil {
+		nextState.effects[spell.effect.name] = *spell.effect
+	}
+	return nextState
+}
 
+func (g *GameState) tickBossTurn() *GameState {
+	nextState := g.CloneAndAdvance()
+	dmg := max(1, g.boss.damage-g.player.armor)
+	nextState.action = fmt.Sprintf("[boss hits for %d]", dmg)
+	nextState.player.hp -= dmg
+	return nextState
+}
+
+func (g *GameState) terminal() bool {
+	return g.player.hp <= 0 || g.boss.hp <= 0
+}
+
+func (g *GameState) Play() *GameState {
+	var candidates CandidatesList
+	candidates.Add(g)
+	for !candidates.Empty() {
+		cur := heap.Pop(&candidates).(*GameState)
+		if cur.player.hp <= 0 {
+			// Can't win from here
+			continue
+		} else if cur.boss.hp <= 0 {
+			// Found the cheapest win
+			return cur.unwind()
+		}
+		// For all other cases, get the new candidates
+		for _, candidate := range cur.nextCandidates() {
+			heap.Push(&candidates, candidate)
+		}
+	}
+	return nil
+}
+
+func (g *GameState) unwind() *GameState {
+	totalCost := g.cost
+	var prev *GameState
+	cur := g
+	for cur != nil {
+		cur.next = prev
+		cur.cost = totalCost
+		prev = cur
+		cur = cur.prev
+	}
+	return prev
+}
+
+func (g GameState) nextCandidates() []*GameState {
+	var res []*GameState
 	for _, spell := range spells {
+		// Environment effects before *player*
+		nextState := g.tickEffects(true)
+		if nextState.terminal() {
+			if nextState.boss.hp <= 0 {
+				res = append(res, nextState)
+			}
+			continue
+		}
+
+		// Try to take the player's turn
 		// Not enough mana to cast
 		if g.player.mana < spell.mana {
 			continue
@@ -189,85 +285,35 @@ func (g *GameState) tickBestPlayerTurn() *GameState {
 		if _, ok := g.effects[spell.name]; ok {
 			continue
 		}
-		// Cost would be higher than best option so far
-		if g.cost+spell.mana >= bestSeen {
+
+		// Found a viable candidate
+		nextState = nextState.tickPlayerTurn(spell)
+		if nextState.terminal() {
+			if nextState.boss.hp <= 0 {
+				res = append(res, nextState)
+			}
 			continue
 		}
 
-		// Found a viable candidate
-		nextState := g.CloneAndAdvance()
-		nextState.option = fmt.Sprintf("%s (-%d mana)", spell.name, spell.mana)
-		nextState.cost += spell.mana
-		nextState.player.mana -= spell.mana
-		nextState.boss.hp -= spell.damage
-		nextState.player.hp += spell.healing
-		if spell.effect != nil {
-			nextState.effects[spell.effect.name] = *spell.effect
+		// Apply effects before boss turn
+		nextState = nextState.tickEffects(false)
+		if nextState.terminal() {
+			if nextState.boss.hp <= 0 {
+				res = append(res, nextState)
+			}
+			continue
 		}
 
-		// And now figure out the total cost if we play this move
-		endState := nextState.Play()
-		if endState.cost < bestState.cost {
-			bestState = nextState
-			bestEndState = endState
-		}
-	}
-	g.next = bestState
-	return bestEndState
-}
+		// Let boss attack
+		nextState = nextState.tickBossTurn()
 
-func (g *GameState) tickBossTurn() *GameState {
-	nextState := g.CloneAndAdvance()
-	g.next = nextState
-	dmg := max(1, g.boss.damage-g.player.armor)
-	nextState.option = fmt.Sprintf("[boss hits for %d]", dmg)
-	nextState.player.hp -= dmg
-	return nextState
-}
-
-func (g *GameState) gameOver() bool {
-	if g.player.hp <= 0 {
-		g.cost = INF
-	}
-	return g.player.hp <= 0 || g.boss.hp <= 0
-}
-
-func (g *GameState) Play() *GameState {
-	var nextState *GameState
-	switch g.turn % 4 {
-	case 0:
-		// Environment effects before *player*
-		nextState = g.tickEffects(true)
-	case 1:
-		// Player's turn
-		nextState = g.tickBestPlayerTurn()
-	case 2:
-		// Environment effects before *boss*
-		nextState = g.tickEffects(true)
-	case 3:
-		// Boss's turn
-		nextState = g.tickBossTurn()
-	}
-
-	if nextState.gameOver() {
-		bestSeen = min(bestSeen, nextState.cost)
-		return nextState
-	} else {
-		return nextState.Play()
-	}
-}
-
-func (g *GameState) Path() string {
-	res := g.option
-	cur := g.next
-	for cur != nil {
-		res += " -> " + cur.option
-		cur = cur.next
+		// And no matter what, we push this as a new possible state
+		res = append(res, nextState)
 	}
 	return res
 }
 
-func (g *GameState) turnString() string {
+func (g GameState) turnString() string {
 	// Offset by 1 because it's what happened *after* the turn played
 	if g.turn == 0 {
 		return "GAME START"
@@ -285,19 +331,27 @@ func (g *GameState) turnString() string {
 	return "INVALID STATE"
 }
 
-func (g *GameState) PrintLog() {
-	cur := g
+func (g GameState) PrintLog() {
+	colors := []string{
+		"\033[31m", // boss (red)
+		"\033[36m", // environment (light blue)
+		"\033[32m", // player (green)
+		"\033[36m", // environment (light blue)
+	}
+	reset := "\033[0m"
+	cur := &g
 	for cur != nil {
-		if cur.option != "" {
-			fmt.Printf("Turn %2d (%s)\n", cur.turn, cur.turnString())
-			fmt.Printf("-------\n")
-			fmt.Printf("Action: %s\n", cur.option)
-			fmt.Printf("Player: %dhp, %dmana", cur.player.hp, cur.player.mana)
+		if cur.action != "" {
+			turn := ""
+			turn += fmt.Sprintf("Turn %d (%s)\n", (cur.turn-1)/4+1, cur.turnString())
+			turn += "-------\n"
+			turn += fmt.Sprintf("%s\n", cur.action)
+			turn += fmt.Sprintf("Player: %dhp, %dmana", cur.player.hp, cur.player.mana)
 			if cur.player.armor > 0 {
-				fmt.Printf(" (+armor)")
+				turn += " (+armor)"
 			}
-			fmt.Printf("\nBoss: %dhp\n", cur.boss.hp)
-			fmt.Printf("\n")
+			turn += fmt.Sprintf("\nBoss: %dhp\n\n", cur.boss.hp)
+			fmt.Printf("%s%s%s", colors[cur.turn%len(colors)], turn, reset)
 		}
 		cur = cur.next
 	}
@@ -317,16 +371,16 @@ func main() {
 	}
 
 	game := NewGame(player, boss)
-	end := game.Play()
-	fmt.Printf("Best play: %s\n\n", game.Path())
-	game.PrintLog()
-	fmt.Printf("Part 1: %d\n", end.cost)
+	solution := game.Play()
+	solution.PrintLog()
+	fmt.Printf("Part 1: %d\n", solution.cost)
 
 	hardMode := NewGame(player, boss, withEffect(Effect{
 		name:           "HardMode",
 		playerPoison:   1,
 		turnsRemaining: INF,
 	}))
-	hardModeEnd := hardMode.Play()
-	fmt.Printf("Part 2: %d\n", hardModeEnd.cost)
+	solution = hardMode.Play()
+	solution.PrintLog()
+	fmt.Printf("Part 2: %d\n", solution.cost)
 }
